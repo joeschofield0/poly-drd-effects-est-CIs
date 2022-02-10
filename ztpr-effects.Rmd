@@ -1,0 +1,227 @@
+---
+title: "ztpr-effects"
+author: "JS"
+date: "10/02/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggeffects)
+library(dplyr)
+library(ggplot2)
+library(ggthemes)
+```
+
+# Model effects - truncated
+Generate estimates (lambda hats) using:
+$$
+\hat\lambda = \frac{\hat\lambda_{untrunc}}{1 - exp(-\hat\lambda_{untrunc})}
+$$
+```{r yr_age_effects}
+# GGEFFECTS
+# Note: ggeffect generates "marginal means"(not conditioned)
+
+# Get raw effects
+yrage.eff <- read.csv("yrage.eff.csv")
+
+yrage.eff <- yrage.eff |>  
+  select(-c(3:5)) |> 
+  rename(yr = x) |> 
+  mutate(yr = yr + 2007) |> 
+  rename(age = group) |> 
+  relocate(yr, age, predicted)
+
+yrage.eff$age <- factor(yrage.eff$age,
+                        levels = c("under 25", "25 to 34", "35 to 44", "45 to 54", "55 and over")
+)
+
+yrage.eff <- yrage.eff |> 
+  arrange(yr, age)
+
+# Generate 'Truncated' effects
+yrage.eff$lamhat <- (yrage.eff$predicted / (1 - exp(-yrage.eff$predicted)))
+
+# Add column with n in each group
+# e.g. when yr == 2008 and Age == Under25, n = 91
+yrage.df <- read.csv("yrage.df.csv")
+
+names(yrage.df) <- c("yr", "age", "n")
+
+yrage.df$age <- factor(yrage.df$age,
+                        levels = c("under 25", "25 to 34", "35 to 44", "45 to 54", "55 and over")
+)
+
+yrage.df <- yrage.df |> 
+  arrange(yr, age)
+
+yrage.eff <- cbind(
+  yrage.eff, yrage.df[, 3]
+)
+
+colnames(yrage.eff)[5] <- "n"
+
+rm(yrage.df)
+
+# Z(sub alpha/2) is the (alpha/2)th quantile of the standard normal distribution
+z <- qnorm(0.025, mean = 0, sd = 1)
+```
+
+
+# 1: CIs using DI METHOD
+Generate CIs for lambda using:  
+Daidoji & Iwasaki's (2012) method (Wald-type CI)
+Sangnawakij notes that this method "provides coverage probabilities lower than the nominal level in many cases"
+$$
+  CI_{\small DI} = \hat{\lambda} \pm Z_{\alpha/2} \sqrt{\frac{\hat{\lambda}(1 - exp(-\hat\lambda))^{2}}{n(1-(\hat\lambda + 1) exp(-\hat\lambda))}}
+$$
+``` {r ci_di}
+# Numerator
+yrage.eff <- yrage.eff |> 
+  mutate(numerator.di = 
+           lamhat * (1 - exp(-lamhat)) ^ 2
+)
+
+# Denominator
+yrage.eff <- yrage.eff |> 
+  mutate(denominator.di = 
+           n * (1-(lamhat + 1) * exp(-lamhat))
+)
+
+# ci_base
+yrage.eff <- yrage.eff |> 
+  mutate(ci_base.di = sqrt(
+    numerator.di / denominator.di
+    )
+  )
+
+# calc CIs using DI method
+yrage.eff <- yrage.eff |> 
+  mutate(ci_low.di = lamhat + (z * ci_base.di)) |> 
+  mutate(ci_high.di = lamhat - (z * ci_base.di))
+
+# Tidy up
+yrage.eff[, c(3, 6:8)] <- NULL
+```
+
+# 2: CIs using PR method
+Novel method from Sangnawakij 2021.
+$$
+CI_{\small PR} = \hat\lambda\pm Z_{\alpha/2}\sqrt{\frac{\hat\lambda^{2}(1-exp(-\hat\lambda))}{n(\hat\lambda-1+exp(-\hat\lambda))}}
+$$
+```{r ci_pr}
+# Numerator
+yrage.eff <- yrage.eff |> 
+  mutate(numerator.pr = 
+           (lamhat ^ 2) * (1 - exp(-lamhat))
+)
+
+# Denominator
+yrage.eff <- yrage.eff |> 
+  mutate(denominator.pr = 
+           n * (lamhat - 1 + exp(-lamhat))
+)
+
+# ci_base
+yrage.eff <- yrage.eff |> 
+  mutate(ci_base.pr = sqrt(
+    numerator.pr / denominator.pr
+    )
+  )
+
+# calc CIs using PR method
+yrage.eff <- yrage.eff |> 
+  mutate(ci_low.pr = lamhat + (z * ci_base.pr)) |> 
+  mutate(ci_high.pr = lamhat - (z * ci_base.pr))
+
+# Tidy up
+yrage.eff[, c(7:9)] <- NULL
+```
+
+```{r export_as_csv}
+yrage.eff <- yrage.eff |> 
+  relocate(
+    yr, age, n, lamhat
+  ) |> 
+  mutate(ci_low_difference =
+           ci_low.di - ci_low.pr) |> 
+  mutate(ci_high_difference = 
+           ci_high.di - ci_high.pr) |> 
+  mutate_at(4:10, round, 2)
+
+write.csv(yrage.eff, "yrage_eff_inc_cis.csv",
+          row.names = FALSE)
+
+ggplot(yrage.eff, aes(x = ci_low_difference, y = ci_high_difference)) +
+  geom_point(position = "jitter")
+
+par(mfrow = c(1,2))
+hist(yrage.eff$ci_low_difference, main = "CI low difference")
+hist(yrage.eff$ci_high_difference, main = "CI high difference")
+```
+
+``` {r plot_effects_di}
+pd = position_dodge(0.5)
+
+ggplot(yrage.eff,
+       aes(x = yr, y = lamhat, colour = age)) +
+  geom_errorbar(aes(x = yr, ymin = ci_low.di, ymax = ci_high.di),
+                position = pd,
+                size = 0.5,
+                width = 0,
+                alpha = 0.9) +
+  geom_point(position = pd) +
+  geom_line(position = pd) +
+  theme_clean() +
+  scale_y_continuous(
+    limits = c(0, 3.5),
+  ) +
+  scale_x_continuous(
+    breaks = seq(2008, 2020, 3)
+  ) +
+  ggtitle("Marginal mean number of drugs. Year x Age Effects",
+        subtitle = "CI method = DI") +
+  xlab("\nYear of death") +
+  ylab("Marginal mean number of drugs\n") +
+  guides(colour = guide_legend(reverse = TRUE)) +
+  scale_color_brewer(palette = "Set1")
+
+ggsave("yrage_effects_plot_ci_method_DI.png",
+       width = 15,
+       height = 9,
+       units = "cm"
+       )
+```
+
+``` {r plot_effects_pr}
+pd = position_dodge(0.5)
+
+ggplot(yrage.eff,
+       aes(x = yr, y = lamhat, colour = age)) +
+  geom_errorbar(aes(x = yr, ymin = ci_low.pr, ymax = ci_high.pr),
+                position = pd,
+                size = 0.5,
+                width = 0,
+                alpha = 0.9) +
+  geom_point(position = pd) +
+  geom_line(position = pd) +
+  theme_clean() +
+  scale_y_continuous(
+    limits = c(0, 3.5),
+  ) +
+  scale_x_continuous(
+    breaks = seq(2008, 2020, 3)
+  ) +
+  ggtitle("Marginal mean number of drugs. Year x Age Effects",
+        subtitle = "CI method = PR") +
+  xlab("\nYear of death") +
+  ylab("Marginal mean number of drugs\n") +
+  guides(colour = guide_legend(reverse = TRUE)) +
+  scale_color_brewer(palette = "Set2")
+
+ggsave("yrage_effects_plot_ci_method_PR.png",
+       width = 15,
+       height = 9,
+       units = "cm"
+       )
+```
